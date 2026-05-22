@@ -1,16 +1,12 @@
 # RAPPORT — TP DevSecOps
-## De l'application au déploiement
 
 **Étudiante** : Ikram Lahmouri  
-**Application support** : `support-tickets` — Next.js fullstack (gestion de tickets)  
-**Dépôt GitHub** : https://github.com/ikramlhm-hub/tp-devsecops  
-**URL de déploiement** : http://180.149.198.63  
-
----
+**Dépôt** : https://github.com/ikramlhm-hub/tp-devsecops  
+**App déployée** : http://180.149.198.63
 
 ## Mise en route
 
-L'application a été téléchargée depuis le lien fourni, extraite et lancée localement après installation des dépendances, initialisation de la base de données SQLite via Prisma et seed des données de test.
+Installation, configuration et lancement de l'application en local :
 
 ```bash
 npm install
@@ -20,68 +16,54 @@ npx tsx prisma/seed.ts
 npm run dev
 ```
 
-Connexion avec `admin@helpdesk.io / Password123!` sur `http://localhost:3000`.
+![Dashboard local](captures/capture-01.png)
+*L'application tourne sur localhost:3000 — dashboard admin avec les tickets de test*
 
-![Dashboard local avec tickets](captures/capture-01.png)
-*Capture 1 — Dashboard local avec les tickets de test visibles*
+## Étape 1 — Docker
 
----
+### Questions sur le Dockerfile
 
-## ÉTAPE 1 — Conteneurisation Docker
+**Q1 — Pourquoi un multi-stage build ?**
 
-### 1.1 Analyse du Dockerfile
+Avec un seul `FROM`, l'image finale embarquerait tout : TypeScript, les sources, les devDependencies, le CLI Prisma... soit environ 1 GB. Le multi-stage sépare les rôles :
 
-#### Q1 — Pourquoi un multi-stage build plutôt qu'un seul `FROM` ?
+| Stage | Rôle | Dans l'image finale |
+|---|---|---|
+| `deps` | `npm ci` — installe toutes les dépendances | Non |
+| `builder` | Compile TypeScript, génère le build Next.js | Non |
+| `runner` | Copie uniquement les artefacts de prod | Oui |
 
-Un build mono-stage embarquerait dans l'image finale tous les outils de développement : TypeScript, les sources `.ts`, l'intégralité de `node_modules` (y compris les devDependencies), le CLI Prisma, etc. Le multi-stage résout ce problème en séparant les responsabilités :
+Résultat : 234 MB au lieu de ~1 GB.
 
-- **Stage `deps`** : installe toutes les dépendances (`npm ci`) — image jetable
-- **Stage `builder`** : compile le TypeScript et génère le build Next.js — image jetable
-- **Stage `runner`** : copie uniquement les artefacts compilés nécessaires à l'exécution
+**Q2 — `output: 'standalone'` dans next.config.js**
 
-R�sultat : l'image finale fait **234 MB** au lieu de ~1 GB avec un build mono-stage. L'attaquant qui compromettrait le conteneur n'aurait pas accès aux sources ni aux outils de build.
-
-#### Q2 — Que fait `output: 'standalone'` dans `next.config.js` ?
-
-```js
-const nextConfig = {
-  output: 'standalone',
-};
-```
-
-Cette option demande à Next.js de générer un dossier `.next/standalone` contenant un serveur Node.js autonome (`server.js`) avec uniquement les modules npm strictement nécessaires à l'exécution. Docker copie ce dossier dans le stage `runner` :
+Cette option génère un dossier `.next/standalone` avec un `server.js` autonome et uniquement les modules nécessaires à l'exécution. Docker exploite ça dans le stage `runner` :
 
 ```dockerfile
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+CMD ["node", "server.js"]
 ```
 
-Le conteneur démarre avec `CMD ["node", "server.js"]` — sans npm, sans Next.js CLI.
+Sans cette option, il faudrait copier l'intégralité de `node_modules` dans l'image finale.
 
-#### Q3 — Pourquoi créer un utilisateur `nextjs` non-root ?
+**Q3 — Utilisateur non-root**
 
-Par défaut, les processus dans un conteneur s'exécutent en tant que `root`. En cas de faille applicative (RCE), l'attaquant disposerait des droits root dans le conteneur, facilitant l'escalade de privilèges. L'utilisateur `nextjs` (uid 1001, pas de shell) applique le principe du moindre privilège.
+Si un attaquant exploite une faille dans l'app, il se retrouve avec les droits de l'utilisateur `nextjs` (uid 1001, sans shell) et non de `root`. Il ne peut ni modifier le système, ni installer des outils, ni lire des fichiers sensibles. C'est le principe du moindre privilège.
+
+**Q4 — HEALTHCHECK**
 
 ```dockerfile
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
-USER nextjs
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD wget --spider http://localhost:3000/api/health || exit 1
 ```
 
-#### Q4 — À quoi sert `HEALTHCHECK` ?
+Docker interroge `/api/health` toutes les 30 secondes. Après 3 échecs consécutifs, le conteneur passe en `unhealthy` et peut être redémarré automatiquement. Sans ça, un conteneur planté mais toujours "en cours d'exécution" serait invisible.
 
-```dockerfile
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
-```
-
-Toutes les 30 secondes, Docker appelle `/api/health`. Si 3 appels consécutifs échouent, le conteneur passe en état `unhealthy` et peut être automatiquement redémarré. Sans `HEALTHCHECK`, un conteneur planté mais toujours en cours d'exécution resterait invisible aux systèmes de monitoring.
-
-### 1.2 Build et validation
+### Build et lancement
 
 ```bash
 docker build -t helpdesk:dev .
-# → Image: 234 MB  (< 300 Mo requis)
+# Image: 234 MB (moins de 300 Mo requis)
 
 docker run -d -p 3000:3000 \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
@@ -90,36 +72,33 @@ docker run -d -p 3000:3000 \
 
 docker cp prisma/dev.db helpdesk-container:/app/dev.db
 curl http://localhost:3000/api/health
-# → {"status":"ok","timestamp":"...","uptime":10.24} 
+# {"status":"ok"}
 ```
 
-### 1.3 Docker Compose
+### Docker Compose
 
 ```bash
 docker compose up -d
 docker cp prisma/dev.db helpdesk-app:/app/data/dev.db
 curl http://localhost:3000/api/health
-# → {"status":"ok"} 
+# {"status":"ok"}
 ```
 
----
+## Étape 2 — Tests unitaires
 
-## ÉTAPE 2 — Tests unitaires
-
-### 2.1 Tests existants
+### Tests existants
 
 ```bash
 npm test
-# ✓ tests/unit/auth.test.ts (6)
-# ✓ tests/unit/validators.test.ts (7)
-# Tests: 13 passed
+# auth.test.ts (6 tests)
+# validators.test.ts (7 tests)
+# 13 tests passent
 ```
 
-### 2.2 Tests supplémentaires ajoutés
+### Nouveaux tests ajoutés
 
-Trois nouveaux fichiers de tests ont été créés :
+**`src/lib/permissions.ts`** — fichier créé :
 
-**`src/lib/permissions.ts`** — nouveau fichier créé :
 ```typescript
 export function canEditTicket(user: User, ticket: Ticket): boolean {
   if (user.role === 'ADMIN') return true;
@@ -127,20 +106,23 @@ export function canEditTicket(user: User, ticket: Ticket): boolean {
   if (user.role === 'USER' && ticket.authorId === user.id) return true;
   return false;
 }
+
+export function canDeleteTicket(user: User): boolean {
+  return user.role === 'ADMIN';
+}
 ```
 
-**`tests/unit/permissions.test.ts`** — 6 tests : canEditTicket (ADMIN, AGENT, USER propriétaire, USER non-propriétaire) + canDeleteTicket
+Tests ajoutés :
 
-**`tests/unit/extra.test.ts`** — 6 tests : loginSchema (valide, email vide, password vide), ticketUpdateSchema (statut valide/invalide), token JWT expiré/invalide
+- `permissions.test.ts` — 6 tests : ADMIN/AGENT peuvent tout modifier, USER seulement ses tickets, seul ADMIN peut supprimer
+- `extra.test.ts` — 6 tests : `loginSchema` (cas valides et invalides), `ticketUpdateSchema`, token JWT expiré
 
-**Résultat : 25 tests passent sur 4 fichiers.**
+Total : 25 tests passent sur 4 fichiers.
 
 ### Couverture finale
 
-![Tableau de couverture npm run test:coverage](captures/capture-03.png)
-*Capture 2 — Couverture finale après ajout des nouveaux tests*
-
-**Résultats `src/lib` :**
+![Tableau de couverture](captures/capture-03.png)
+*Résultat de npm run test:coverage — couverture sur src/lib/*
 
 | Fichier | Statements | Branches | Fonctions |
 |---|---|---|---|
@@ -149,151 +131,146 @@ export function canEditTicket(user: User, ticket: Ticket): boolean {
 | `auth.ts` | 80% | 100% | 80% |
 | `prisma.ts` | 0% | 0% | 0% |
 
-**Pourquoi < 100% sur certains fichiers ?**
+**Pourquoi moins de 100% sur certains fichiers ?**
 
-- `auth.ts` (80%) : la fonction `getAuthFromRequest(req: NextRequest)` (lignes 39-43) dépend de l'objet `NextRequest` de Next.js, difficile à instancier hors du runtime Next.js sans mock complexe.
-- `prisma.ts` (0%) : ce fichier initialise uniquement la connexion Prisma. Tester une connexion réelle à une DB relève des tests d'intégration, pas des tests unitaires.
-- Routes API et pages React (0%) : nécessitent un serveur Next.js complet — tests end-to-end (Cypress, Playwright).
+- `auth.ts` à 80% : la fonction `getAuthFromRequest()` dépend de `NextRequest`, un objet Next.js impossible à instancier proprement en test unitaire. Les lignes 39-43 restent non couvertes.
+- `prisma.ts` à 0% : ce fichier initialise uniquement la connexion à la DB. On ne teste pas une connexion réelle en unitaire, c'est du ressort des tests d'intégration.
+- Routes API et pages React à 0% : nécessitent un serveur Next.js complet (Cypress, Playwright).
 
----
+## Étape 3 — Tests de charge k6
 
-## ÉTAPE 3 — Tests de montée en charge avec k6
-
-### 3.1 Smoke test
+### Smoke test (1 VU, 10 secondes)
 
 ```bash
 k6 run k6/smoke-test.js
 ```
 
-| Métrique | Résultat | Seuil | Statut |
+| Métrique | Résultat | Seuil | Validation |
 |---|---|---|---|
-| p(95) latency | 1.61 ms | < 200 ms | |
-| Taux d'erreur | 0.00% | < 1% |  |
-| Requêtes/s | 986 req/s | — | |
+| p(95) latency | 1.61 ms | moins de 200 ms | OK |
+| Taux d'erreur | 0% | moins de 1% | OK |
+| Requêtes/s | 986 | — | — |
 
-### 3.2 Test de charge — 50 VUs (4 minutes)
+### Load test (50 VUs, 4 minutes)
 
 ```bash
 k6 run k6/load-test.js
 ```
 
-![Résumé load test 50 VUs et 200 VUs](captures/capture-04.png)
-*Capture 3 — Résumés k6 : 50 VUs (haut) et 200 VUs (bas)*
+![Résultats k6 — 50 VUs et 200 VUs](captures/capture-04.png)
+*Résumés k6 : 50 VUs (haut) et 200 VUs (bas)*
 
-| Métrique | Résultat | Seuil | Statut |
+| Métrique | Résultat | Seuil | Validation |
 |---|---|---|---|
-| p(95) latency | 12 ms | < 500 ms | |
-| Taux d'erreur | 33% | < 1% |  |
+| p(95) latency | 12 ms | moins de 500 ms | OK |
+| Taux d'erreur | 33% | moins de 1% | Dépassé |
 | Requêtes totales | 25 603 | — | — |
 
-**Analyse** : la latence reste excellente (12 ms au p95), mais le taux d'erreur de 33% révèle une limite de SQLite. Les conflits de verrou en écriture concurrente (`SQLITE_BUSY`) surviennent uniquement sur les créations de tickets. Les lectures fonctionnent parfaitement.
+La latence est excellente mais 33% d'erreurs révèlent une limite de SQLite : le verrou exclusif en écriture bloque les créations de tickets simultanées (`SQLITE_BUSY`). Les lectures ne sont pas impactées.
 
-### 3.3 Bonus — Test à 200 VUs (5 minutes)
+### Bonus — 200 VUs (5 minutes)
 
-![Résumé load test 200 VUs détaillé](captures/capture-05.png)
-*Capture 4 — Load test 200 VUs : point de rupture documenté*
+![Load test 200 VUs](captures/capture-05.png)
+*200 VUs sur 5 minutes — point de rupture documenté*
 
 | Métrique | 50 VUs | 200 VUs |
 |---|---|---|
-| p(95) latency | 12 ms | 13 ms |
-| Taux d'erreur | 33% | 33% |
-| Requêtes totales | 25 603 | 89 572 |
-| Itérations | 8 534 | 29 857 |
+| p(95) | 12 ms | 13 ms |
+| Erreurs | 33% | 33% |
+| Requêtes | 25 603 | 89 572 |
 
-**Point de rupture** : l'app atteint sa limite dès **50 VUs** (33% d'erreurs) et ce seuil reste stable jusqu'à 200 VUs. La latence ne se dégrade pas, confirmant que le bottleneck est exclusivement le **verrou SQLite en écriture concurrente**. En production : remplacer SQLite par PostgreSQL.
+Point de rupture : dès 50 VUs. Le taux d'erreur reste stable à 33% même à 200 VUs et la latence ne se dégrade pas — ce qui confirme que le problème vient uniquement du verrou SQLite, pas des ressources système. En production, PostgreSQL ou MySQL résoudrait totalement ce problème.
 
----
+## Étape 4 — Sécurité
 
-## ÉTAPE 4 — Sécurité
-
-### 4.1 Audit des dépendances npm
+### Audit npm
 
 ```bash
-npm audit
 npm audit --audit-level=high
+# 11 vulnerabilities (7 moderate, 4 high)
 ```
 
-![Résultat npm audit — 11 vulnérabilités](captures/capture-06.png)
-*Capture 5 — npm audit : 11 vulnérabilités dont 4 HIGH*
+![npm audit et Trivy](captures/capture-06.png)
+*Résultats npm audit (haut) et scan Trivy (bas)*
 
-**Résultat : 11 vulnerabilities (7 moderate, 4 high)**
+4 HIGH détectées :
 
-| Package | Sévérité | Type |
-|---|---|---|
-| `next` 14.2.33 | HIGH | DoS, cache poisoning, XSS |
-| `glob` 10.4.2 | HIGH | Command injection |
+| Package | Vulnérabilité |
+|---|---|
+| `next` 14.2.33 | DoS via Server Components, cache poisoning, XSS |
+| `glob` 10.4.2 | Command injection via filenames malveillants |
 
-**Recommandation** : mettre à jour Next.js vers `>= 14.2.34`. Les fixes nécessitent `npm audit fix --force` — à planifier avec tests de régression.
+Recommandation : mise à jour vers `next >= 14.2.34`. Le fix requiert `npm audit fix --force` à tester avec régression avant déploiement.
 
-### 4.2 Scan d'image Docker avec Trivy
+### Scan Trivy
 
 ```bash
 trivy image helpdesk:dev --severity HIGH,CRITICAL
 # Total: 18 (HIGH: 18, CRITICAL: 0)
 ```
 
-![Résultat Trivy — 18 HIGH](captures/capture-06.png)
-*Capture 6 — Trivy : 18 vulnérabilités HIGH, 0 CRITICAL*
+18 vulnérabilités HIGH sur `next`, `glob`, `tar`, `cross-spawn`, `minimatch`. Toutes ont un fix disponible. Les CVE sur `tar` (path traversal) seraient critiques si l'app traitait des uploads d'archives.
 
-Packages concernés : `next`, `glob`, `tar`, `cross-spawn`, `minimatch`. Les vulnérabilités `tar` concernent des path traversal — critique si l'app traite des uploads d'archives.
+### Exercice 1 — JWT secret faible
 
-### 4.3 Pentest — Exercices guidés
-
-#### Exercice 4.3.1 — JWT secret faible
-
-Le `.env.example` contient un secret trivial :
+Le `.env.example` contient :
 ```
 JWT_SECRET="change-me-in-production-use-a-strong-secret-key-please"
 ```
 
-**Procédure** :
-1. Connexion avec `user@helpdesk.io` → token visible dans le `localStorage`
+Procédure :
 
-![LocalStorage avec token JWT visible](captures/capture-07.png)
-*Capture 7 — Token JWT récupéré dans le localStorage via DevTools*
+1. Connexion avec `user@helpdesk.io` — token récupéré dans le localStorage
 
-2. Sur [jwt.io](https://jwt.io) : modification du payload `"role": "USER"` → `"role": "ADMIN"`, resigné avec le secret du `.env`
+![Token JWT dans le localStorage](captures/capture-07.png)
+*Token JWT visible dans les DevTools, onglet Application, Local Storage*
 
-![jwt.io — payload ADMIN et token forgé](captures/capture-08.png)
-*Capture 8 — Token forgé avec rôle ADMIN sur jwt.io*
+2. Sur jwt.io : `"role": "USER"` modifié en `"role": "ADMIN"`, resigné avec le secret du `.env`
 
-3. Appel `DELETE /api/tickets/<id>` avec le token forgé → **`{"ok":true}`**
+![jwt.io avec payload ADMIN forgé](captures/capture-08.png)
+*Token forgé avec rôle ADMIN — secret valide confirmé par jwt.io, résultat DELETE en dessous*
 
-![Résultat DELETE avec token forgé](captures/capture-08.png)
-*Capture 9 — Le ticket est supprimé avec un token USER forgé en ADMIN*
+3. `DELETE /api/tickets/<id>` avec le token forgé retourne `{"ok":true}` — le ticket est supprimé.
 
-**Résultat : OUI, ça marche.** L'application fait entièrement confiance au contenu du JWT signé, sans vérifier le rôle réel en base de données.
+Résultat : oui, ça marche. L'app accepte n'importe quel token valide sans vérifier le rôle en base. Un USER peut se faire passer pour ADMIN.
 
-**Les 3 mitigations :**
+3 mitigations :
 
-1. **Secret fort** : `openssl rand -base64 64` — 512 bits aléatoires. Stocker dans Azure Key Vault, jamais dans un `.env` versionné.
-2. **Rotation du secret** : changer le `JWT_SECRET` régulièrement (tous les 90 jours). Un secret compromis non tourné reste exploitable indéfiniment.
-3. **Vérification en base** : pour les actions critiques (DELETE, accès admin), vérifier en base que l'utilisateur possède réellement le rôle revendiqué, pas seulement dans le token.
+1. Secret fort — `openssl rand -base64 64` génère 512 bits aléatoires. Le stocker dans Azure Key Vault, jamais dans un `.env` versionné.
+2. Rotation — renouveler le secret tous les 90 jours. Un secret compromis non tourné reste exploitable indéfiniment.
+3. Vérification en base — pour les actions critiques, vérifier le rôle réel de l'utilisateur en DB à chaque requête sensible, pas seulement dans le token.
 
-#### Exercice 4.3.2 — Authorization bypass
+### Exercice 2 — Authorization bypass
 
-![Authorization bypass — {"error":"Forbidden"}](captures/capture-10.png)
-*Capture 10 — La protection est en place : accès au ticket d'un autre user retourne 403*
+```bash
+curl -H "Authorization: Bearer $TOKEN_USER" \
+  http://localhost:3001/api/tickets/<id-ticket-admin>
+# {"error":"Forbidden"}
+```
 
-**Résultat : la protection fonctionne.** Le code vérifie correctement :
+![Authorization bypass — Forbidden](captures/capture-10.png)
+*Un USER ne peut pas accéder au ticket d'un autre utilisateur — 403 retourné*
+
+La protection est en place. Le code vérifie correctement l'ownership :
+
 ```typescript
 if (auth.role === 'USER' && ticket.authorId !== auth.userId) {
   return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 }
 ```
 
-#### Exercice 4.3.3 — Headers de sécurité manquants
+### Exercice 3 — Headers de sécurité manquants
 
-**Headers manquants identifiés :**
+Headers absents des réponses HTTP :
 
-| Header | Impact de l'absence |
+| Header | Protection |
 |---|---|
-| `Content-Security-Policy` | Vulnérable aux attaques XSS |
-| `X-Frame-Options` | Vulnérable au clickjacking |
-| `Strict-Transport-Security` | Vulnérable aux attaques MITM |
-| `X-Content-Type-Options` | Vulnérable au content sniffing |
+| `Content-Security-Policy` | Contre les attaques XSS |
+| `X-Frame-Options` | Contre le clickjacking |
+| `Strict-Transport-Security` | Force HTTPS, contre le MITM |
+| `X-Content-Type-Options` | Contre le MIME sniffing |
 
-**Middleware Next.js créé** (`middleware.ts`) :
+Middleware créé (`middleware.ts`) :
 
 ```typescript
 import { NextResponse } from 'next/server'
@@ -304,9 +281,8 @@ export function middleware(request: NextRequest) {
   response.headers.set('X-Content-Type-Options', 'nosniff')
   response.headers.set('X-Frame-Options', 'DENY')
   response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
-  response.headers.set(
-    'Content-Security-Policy',
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com;"
+  response.headers.set('Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;"
   )
   return response
 }
@@ -316,50 +292,44 @@ export const config = {
 }
 ```
 
----
+Note : en mode `output: standalone`, le middleware ne s'applique pas via `node server.js`. En production, la solution propre est un reverse proxy Nginx ou la configuration des headers dans `next.config.js` via `headers()`.
 
-## ÉTAPE 5 — CI/CD GitHub Actions
+## Étape 5 — CI/CD GitHub Actions
 
-### 5.1 Structure du workflow
+Le fichier `.github/workflows/ci-cd.yml` enchaîne 4 jobs :
 
-Le fichier `.github/workflows/ci-cd.yml` définit 4 jobs en chaîne :
+```
+test → security → docker → deploy (main uniquement)
+```
 
-- **`test`** : lint ESLint + tests unitaires avec couverture
-- **`security`** : `npm audit` + scan Trivy filesystem
-- **`docker`** : build image + scan Trivy image
-- **`deploy`** : déploiement automatique sur `main` uniquement
+Chaque job ne s'exécute que si le précédent réussit — principe du pipeline gate : une vulnérabilité critique ou un test échoué bloque le déploiement.
 
-### 5.2 Corrections apportées
+3 corrections apportées pour obtenir le pipeline vert :
 
-Trois problèmes ont été corrigés pour obtenir un pipeline vert :
+| Problème | Solution |
+|---|---|
+| ESLint non configuré | Ajout de `.eslintrc.json` |
+| Dossier `public` vide non versionné | Ajout de `public/.gitkeep` |
+| Image Docker non disponible pour Trivy | Ajout de `load: true` dans build-push-action |
 
-1. **Absence de config ESLint** → ajout de `.eslintrc.json`
-2. **Dossier `public` vide non versionné** → ajout de `public/.gitkeep`
-3. **Image Docker non chargée pour Trivy** → ajout de `load: true`
+![Pipeline GitHub Actions vert](captures/capture-11.png)
+*Jobs test, security et docker verts sur la branche develop*
 
-![Pipeline GitHub Actions vert sur develop](captures/capture-11.png)
-*Capture 11 — Pipeline CI/CD : 3 jobs verts sur la branche develop*
+## Étape 6 — Déploiement
 
----
+### Contexte
 
-## ÉTAPE 6 — Déploiement
+L'abonnement Azure for Students était expiré au moment du TP. Plutôt que de ne pas rendre cette partie, j'ai déployé sur le VPS Debian fourni par l'école — les concepts mis en oeuvre sont identiques.
 
-### Contexte — Alternative au déploiement Azure
-
-L'abonnement **Azure for Students** était expiré. Plutôt que de bloquer, j'ai mis en place une alternative équivalente sur le **VPS Debian** fourni par l'école :
-
-| Composant | Azure (prévu) | Solution retenue |
+| | Azure (prévu) | Solution retenue |
 |---|---|---|
-| Registry | Azure Container Registry | Docker Hub (`ikram279/helpdesk`) |
-| Hébergement | Azure App Service | VPS Debian (`180.149.198.63`) |
-| Déploiement CI | `azure/webapps-deploy` | `appleboy/ssh-action` |
+| Registry | Azure Container Registry | Docker Hub |
+| Hébergement | Azure App Service | VPS Debian |
+| CI Deploy | `azure/webapps-deploy` | `appleboy/ssh-action` |
 
-Les concepts sont identiques : conteneurisation, registry, déploiement automatisé.
-
-### Déploiement sur le VPS
+### Déploiement
 
 ```bash
-# Push de l'image sur Docker Hub
 docker tag helpdesk:dev ikram279/helpdesk:v1
 docker push ikram279/helpdesk:v1
 
@@ -370,117 +340,103 @@ docker run -d -p 80:3000 \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
   -e DATABASE_URL="file:/app/data/dev.db" \
   ikram279/helpdesk:v1
+
+docker cp /tmp/dev.db helpdesk-app:/app/data/dev.db
+curl http://localhost/api/health
+# {"status":"ok"}
 ```
 
-![VPS — déploiement Docker et health check](captures/capture-12.png)
-*Capture 12 — Déploiement sur le VPS : conteneur lancé et health check OK*
+![Déploiement sur le VPS](captures/capture-12.png)
+*Conteneur lancé sur le VPS — health check OK*
 
-![VPS — page d'accueil accessible publiquement](captures/capture-13.png)
-*Capture 13 — Application accessible sur http://180.149.198.63*
+![Page d'accueil sur l'IP publique](captures/capture-13.png)
+*Application accessible sur http://180.149.198.63*
 
-![VPS — dashboard après connexion admin](captures/capture-14.png)
-*Capture 14 — Dashboard connecté en admin sur le VPS*
+![Dashboard admin sur le VPS](captures/capture-14.png)
+*Dashboard connecté en admin — tickets visibles en production*
 
-**URL publique : http://180.149.198.63** 
+### CI/CD automatisé (bonus)
 
-### Déploiement automatisé CI/CD (bonus 6.7)
+Secrets configurés dans GitHub Actions :
 
-5 secrets configurés dans GitHub Actions :
-
-| Secret | Valeur |
+| Secret | Description |
 |---|---|
-| `DOCKERHUB_USERNAME` | `ikram279` |
-| `DOCKERHUB_TOKEN` | Personal Access Token |
-| `VPS_HOST` | `180.149.198.63` |
-| `VPS_USER` | `root` |
-| `VPS_PASSWORD` | Mot de passe SSH |
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Authentification Docker Hub |
+| `VPS_HOST` / `VPS_USER` / `VPS_PASSWORD` | Connexion SSH au VPS |
 
-À chaque push sur `main` : build → push Docker Hub → redéploiement automatique sur le VPS via SSH.
+A chaque push sur `main` : build, push Docker Hub, redéploiement automatique via SSH.
 
 ![Pipeline complet vert avec Deploy to VPS](captures/capture-15.png)
-*Capture 15 — Pipeline final : 4 jobs verts dont "Deploy to VPS" sur main*
+*4 jobs verts sur main — le deploy automatique fonctionne*
 
----
+## Synthèse
 
-## 🏁 Synthèse finale
-
-### Architecture finale
+### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        DEV (local)                          │
-│  code → git commit → git push origin develop                │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   GITHUB (develop)                          │
-│                                                             │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐               │
-│  │  test    │──►│ security │──►│  docker  │               │
-│  │ lint+    │   │ audit+   │   │ build+   │               │
-│  │ vitest   │   │ trivy fs │   │ trivy img│               │
-│  └──────────┘   └──────────┘   └──────────┘               │
-│                                                             │
-│         git merge develop → main                           │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   GITHUB (main)                             │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │                   deploy job                        │   │
-│  │  1. docker build                                    │   │
-│  │  2. docker push → Docker Hub (ikram279/helpdesk)    │   │
-│  │  3. SSH → VPS → docker pull + run                   │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│              VPS Debian (180.149.198.63)                    │
-│         http://180.149.198.63  ✅ accessible                │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│                  DEV (local)                    │
+│  code → commit → git push origin develop        │
+└────────────────────┬────────────────────────────┘
+                     |
+                     v
+┌─────────────────────────────────────────────────┐
+│              GITHUB — develop                   │
+│                                                 │
+│  [test] ──> [security] ──> [docker]             │
+│  lint+       audit+          build+             │
+│  vitest      trivy fs        trivy img          │
+│                                                 │
+│       git merge develop → main                  │
+└────────────────────┬────────────────────────────┘
+                     |
+                     v
+┌─────────────────────────────────────────────────┐
+│              GITHUB — main                      │
+│                                                 │
+│  [deploy]                                       │
+│  1. docker build                                │
+│  2. push → Docker Hub (ikram279/helpdesk)       │
+│  3. SSH → VPS → docker pull + run               │
+└────────────────────┬────────────────────────────┘
+                     |
+                     v
+┌─────────────────────────────────────────────────┐
+│         VPS Debian — 180.149.198.63             │
+│         http://180.149.198.63                   │
+└─────────────────────────────────────────────────┘
 
-Note : Équivalent Azure = Docker Hub → ACR / VPS → App Service
+Equivalent Azure : Docker Hub → ACR  /  VPS → App Service
 ```
 
-### 3 améliorations DevSecOps avec plus de temps
+### 3 améliorations avec plus de temps
 
-**1. Gestion des secrets avec Azure Key Vault**
-Actuellement, le `JWT_SECRET` est injecté via des variables d'environnement. En production, les secrets doivent être stockés dans Azure Key Vault (ou HashiCorp Vault). L'application récupèrerait les secrets au démarrage via une identité managée, sans jamais les exposer dans les logs.
+**1. Secrets dans Azure Key Vault**
 
-**2. Monitoring avec Azure Application Insights (ou Prometheus/Grafana)**
-L'application n'a aucune observabilité au-delà de `/api/health`. Il faudrait collecter des métriques (temps de réponse, taux d'erreur), des logs structurés JSON avec corrélation des traces, et des alertes automatiques (latence p99 > 500ms, taux d'erreur > 5%).
+Le `JWT_SECRET` est actuellement injecté via une variable d'environnement. En production, il doit être stocké dans un gestionnaire de secrets (Key Vault, HashiCorp Vault) et récupéré au démarrage via une identité managée — jamais exposé dans les logs ni les variables visibles.
 
-**3. Scan SAST avec SonarQube ou Semgrep**
-L'audit npm et Trivy détectent les vulnérabilités dans les dépendances, pas dans le code applicatif. Un outil SAST analyserait le code source pour détecter des injections potentielles, secrets hardcodés, failles de logique métier, mauvaises pratiques cryptographiques — intégré comme étape dans le pipeline CI/CD avant le build Docker.
+**2. Monitoring avec Prometheus et Grafana**
+
+L'app n'a aucune observabilité au-delà de `/api/health`. Il faudrait des métriques (latence, taux d'erreur, RPS), des logs structurés JSON et des alertes automatiques. Cela aurait aussi permis de détecter le bottleneck SQLite en temps réel pendant les tests k6.
+
+**3. SAST avec SonarQube ou Semgrep**
+
+L'audit npm et Trivy détectent les vulnérabilités dans les dépendances. Un outil SAST analyse le code source lui-même : injections potentielles, secrets hardcodés, failles de logique métier. A intégrer dans le pipeline entre les jobs `security` et `docker`.
 
 ### Coût
 
-Déploiement Azure non réalisé (abonnement expiré) → **coût : 0 €**.
-Le VPS est fourni par l'école et Docker Hub est gratuit pour les images publiques.
+Azure non utilisé — coût 0 euro. Le VPS est fourni par l'école, Docker Hub est gratuit.
 
-Pour référence, le coût estimé avec Azure aurait été < 1$ de crédit consommé sur la durée du TP (ACR Basic ~5$/mois + App Service B1 ~13$/mois).
+Estimé avec Azure : ACR Basic (~5$/mois) + App Service B1 (~13$/mois) = moins de 1$ sur la durée du TP.
 
-### Ce qui m'a posé problème et comment je l'ai résolu
+### Difficultés rencontrées
 
-**Problème 1 — DB dans le conteneur Docker**
-`npx prisma migrate deploy` échouait car le Dockerfile ne copie pas le CLI Prisma. Solution : copie directe du fichier `dev.db` avec `docker cp`.
+| Problème | Solution |
+|---|---|
+| `npx prisma migrate deploy` échoue dans le conteneur — le CLI Prisma n'est pas dans l'image finale | `docker cp prisma/dev.db` pour copier la DB directement |
+| Disque saturé à 100% pendant les builds Docker | `docker system prune -a` + suppression des dossiers en double (1,8 GB récupérés) |
+| Middleware Next.js sans effet en mode standalone | Documenté — solution : reverse proxy Nginx ou `headers()` dans `next.config.js` |
+| Azure for Students expiré | Déploiement sur VPS Debian — mêmes concepts, résultat équivalent |
+| Pipeline rouge au premier push | 3 corrections ciblées diagnostiquées via les logs GitHub Actions |
 
-**Problème 2 — Espace disque saturé à 100%**
-Images Docker accumulées + dossiers Postman en double (1,8 GB). Solution : `docker system prune -a` + suppression manuelle.
-
-**Problème 3 — Middleware Next.js sans effet**
-Le fichier `middleware.ts` était correct mais les headers n'apparaissaient pas. Le mode `output: standalone` ne charge pas le middleware via `node server.js`. Solution documentée : utiliser un reverse proxy Nginx ou configurer les headers dans `next.config.js`.
-
-**Problème 4 — Azure for Students expiré**
-Crédit épuisé, impossible de réactiver. Solution : déploiement sur VPS Debian avec Docker Hub — concepts identiques, résultat équivalent (URL publique + CI/CD automatisé).
-
-**Problème 5 — Pipeline CI/CD rouge**
-Trois erreurs successives corrigées : config ESLint manquante, dossier `public` vide non versionné, image Docker non chargée pour Trivy. Chaque erreur diagnostiquée via les logs GitHub Actions.
-
----
-
-*Rapport rédigé par Ikram Lahmouri — TP DevSecOps*
+*Ikram Lahmouri — TP DevSecOps*
