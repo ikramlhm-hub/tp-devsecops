@@ -407,28 +407,43 @@ docker run -d -p 80:3000 \
 ### Architecture finale
 
 ```
-Dev (local)
-    │
-    │  git push origin develop
-    ▼
-GitHub Repository
-    │
-    ├── Branch: develop ──► CI Pipeline
-    │                           ├── [test]     Lint + Tests unitaires
-    │                           ├── [security] npm audit + Trivy
-    │                           └── [docker]   Build + Scan image
-    │
-    │  git merge develop → main
-    ▼
-GitHub main branch
-    │
-    └── CI/CD Pipeline ──► [deploy]
-                               ├── Build image Docker
-                               ├── Push → Docker Hub (ikram279/helpdesk:latest)
-                               └── SSH → VPS Debian (180.149.198.63)
-                                         └── docker pull + run → http://180.149.198.63
+┌─────────────────────────────────────────────────────────────┐
+│                        DEV (local)                          │
+│  code → git commit → git push origin develop                │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   GITHUB (develop)                          │
+│                                                             │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐               │
+│  │  test    │──►│ security │──►│  docker  │               │
+│  │ lint+    │   │ audit+   │   │ build+   │               │
+│  │ vitest   │   │ trivy fs │   │ trivy img│               │
+│  └──────────┘   └──────────┘   └──────────┘               │
+│                                                             │
+│         git merge develop → main                           │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   GITHUB (main)                             │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │                   deploy job                        │   │
+│  │  1. docker build                                    │   │
+│  │  2. docker push → Docker Hub (ikram279/helpdesk)    │   │
+│  │  3. SSH → VPS → docker pull + run                   │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              VPS Debian (180.149.198.63)                    │
+│         http://180.149.198.63  ✅ accessible                │
+└─────────────────────────────────────────────────────────────┘
 
-Équivalent Azure : Docker Hub → ACR / VPS → Azure App Service
+Note : Équivalent Azure = Docker Hub → ACR / VPS → App Service
 ```
 
 ### 3 améliorations DevSecOps avec plus de temps
