@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper: #fafaf7;
+  --ink: #0a0a0a;
+  --accent: #ff5722;
+  --muted: #737373;
+}
+
+body {
+  background-color: var(--paper);
+  color: var(--ink);
+  background-image:
+    radial-gradient(circle at 0.5px 0.5px, rgba(10, 10, 10, 0.06) 0.5px, transparent 0);
+  background-size: 24px 24px;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* Bouton primaire */
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-2 bg-ink text-paper px-6 py-3 font-display font-medium tracking-tight transition-all hover:bg-accent;
+}
+.btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 border border-ink text-ink px-6 py-3 font-display font-medium tracking-tight transition-all hover:bg-ink hover:text-paper;
+}
+.input {
+  @apply w-full bg-transparent border-b-2 border-ink/20 px-1 py-3 font-body text-lg outline-none transition-colors focus:border-ink placeholder:text-muted;
+}
+
+/* Badge statut */
+.badge {
+  @apply inline-block px-2 py-0.5 text-xs font-mono uppercase tracking-wider border;
+}
+.badge-open { @apply border-blue-600 text-blue-700 bg-blue-50; }
+.badge-in_progress { @apply border-amber-600 text-amber-700 bg-amber-50; }
+.badge-resolved { @apply border-emerald-600 text-emerald-700 bg-emerald-50; }
+.badge-closed { @apply border-neutral-500 text-neutral-600 bg-neutral-100; }
+
+.badge-low { @apply border-neutral-400 text-neutral-600; }
+.badge-medium { @apply border-blue-400 text-blue-700; }
+.badge-high { @apply border-orange-500 text-orange-700; }
+.badge-urgent { @apply border-red-600 text-red-700 bg-red-50; }

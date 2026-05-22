@@ -1,0 +1,142 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # =========================
+  # 1. Lint & Tests unitaires
+  # =========================
+  test:
+    name: Lint & Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run unit tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  # =========================
+  # 2. Sécurité (SAST + audit deps)
+  # =========================
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
+      - name: npm audit (vulnérabilités dans les dépendances)
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Run Trivy (filesystem scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          exit-code: '0'
+
+  # =========================
+  # 3. Build & push Docker
+  # =========================
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push for student version)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: helpdesk:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Scan de l'image Docker
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'helpdesk:${{ github.sha }}'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+  # =========================
+  # 4. Deploy Azure (main uniquement)
+  # =========================
+  deploy:
+    name: Deploy to Azure
+    runs-on: ubuntu-latest
+    needs: [test, security, docker]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push to ACR
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/helpdesk:${{ github.sha }} .
+          docker tag ${{ secrets.ACR_LOGIN_SERVER }}/helpdesk:${{ github.sha }} ${{ secrets.ACR_LOGIN_SERVER }}/helpdesk:latest
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/helpdesk:${{ github.sha }}
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/helpdesk:latest
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          images: ${{ secrets.ACR_LOGIN_SERVER }}/helpdesk:${{ github.sha }}
