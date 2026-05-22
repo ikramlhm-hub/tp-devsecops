@@ -1,7 +1,7 @@
 # RAPPORT — TP DevSecOps
 ## De l'application au déploiement
 
-**Étudiant·e** : Ikram Lahmouri  
+**Étudiante** : Ikram Lahmouri  
 **Application support** : `support-tickets` — Next.js fullstack (gestion de tickets)  
 **Dépôt GitHub** : https://github.com/ikramlhm-hub/tp-devsecops  
 **URL de déploiement** : http://180.149.198.63  
