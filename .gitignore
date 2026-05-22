@@ -34,3 +34,4 @@ yarn-debug.log*
 # build artifacts
 *.tsbuildinfo
 next-env.d.ts
+TP-ENONCE.md
