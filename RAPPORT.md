@@ -81,7 +81,7 @@ Toutes les 30 secondes, Docker appelle `/api/health`. Si 3 appels consécutifs �
 
 ```bash
 docker build -t helpdesk:dev .
-# → Image: 234 MB ✅ (< 300 Mo requis)
+# → Image: 234 MB  (< 300 Mo requis)
 
 docker run -d -p 3000:3000 \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
@@ -90,7 +90,7 @@ docker run -d -p 3000:3000 \
 
 docker cp prisma/dev.db helpdesk-container:/app/dev.db
 curl http://localhost:3000/api/health
-# → {"status":"ok","timestamp":"...","uptime":10.24} ✅
+# → {"status":"ok","timestamp":"...","uptime":10.24} 
 ```
 
 ### 1.3 Docker Compose
@@ -99,7 +99,7 @@ curl http://localhost:3000/api/health
 docker compose up -d
 docker cp prisma/dev.db helpdesk-app:/app/data/dev.db
 curl http://localhost:3000/api/health
-# → {"status":"ok"} ✅
+# → {"status":"ok"} 
 ```
 
 ---
@@ -167,9 +167,9 @@ k6 run k6/smoke-test.js
 
 | Métrique | Résultat | Seuil | Statut |
 |---|---|---|---|
-| p(95) latency | 1.61 ms | < 200 ms | ✅ |
-| Taux d'erreur | 0.00% | < 1% | ✅ |
-| Requêtes/s | 986 req/s | — | ✅ |
+| p(95) latency | 1.61 ms | < 200 ms | |
+| Taux d'erreur | 0.00% | < 1% |  |
+| Requêtes/s | 986 req/s | — | |
 
 ### 3.2 Test de charge — 50 VUs (4 minutes)
 
@@ -182,8 +182,8 @@ k6 run k6/load-test.js
 
 | Métrique | Résultat | Seuil | Statut |
 |---|---|---|---|
-| p(95) latency | 12 ms | < 500 ms | ✅ |
-| Taux d'erreur | 33% | < 1% | ❌ |
+| p(95) latency | 12 ms | < 500 ms | |
+| Taux d'erreur | 33% | < 1% |  |
 | Requêtes totales | 25 603 | — | — |
 
 **Analyse** : la latence reste excellente (12 ms au p95), mais le taux d'erreur de 33% révèle une limite de SQLite. Les conflits de verrou en écriture concurrente (`SQLITE_BUSY`) surviennent uniquement sur les créations de tickets. Les lectures fonctionnent parfaitement.
@@ -381,7 +381,7 @@ docker run -d -p 80:3000 \
 ![VPS — dashboard après connexion admin](captures/capture-14.png)
 *Capture 14 — Dashboard connecté en admin sur le VPS*
 
-**URL publique : http://180.149.198.63** ✅
+**URL publique : http://180.149.198.63** 
 
 ### Déploiement automatisé CI/CD (bonus 6.7)
 
